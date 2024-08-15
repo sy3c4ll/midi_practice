@@ -1,6 +1,9 @@
 use crate::Note;
-use midly::{Format, Header, MetaMessage, MidiMessage, Smf, Timing, TrackEvent, TrackEventKind};
-use std::iter;
+use midir::MidiOutputConnection;
+use midly::{
+    Format, Header, MetaMessage, MidiMessage, Smf, Timing, Track, TrackEvent, TrackEventKind,
+};
+use std::{iter, thread, time::Duration};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Score(Vec<Note>);
@@ -88,12 +91,9 @@ impl Score {
         self
     }
 
-    pub fn to_midi(&self) -> Smf {
-        const TPB: u16 = 24;
-        let header = Header {
-            format: Format::SingleTrack,
-            timing: Timing::Metrical(TPB.into()),
-        };
+    const TPB: u16 = 24;
+    const BPM: u16 = 120;
+    pub fn to_track(&self) -> Track {
         let mut event_timings = self
             .0
             .iter()
@@ -133,7 +133,7 @@ impl Score {
         let track = event_deltas
             .iter()
             .map(|(d, k)| TrackEvent {
-                delta: (u32::from(*d) * u32::from(TPB) / 4).into(),
+                delta: (u32::from(*d) * u32::from(Self::TPB) / 4).into(),
                 kind: *k,
             })
             .chain(iter::once(TrackEvent {
@@ -141,8 +141,39 @@ impl Score {
                 kind: TrackEventKind::Meta(MetaMessage::EndOfTrack),
             }))
             .collect();
-        let tracks = vec![track];
+        track
+    }
+    pub fn to_midi(&self) -> Smf {
+        let header = Header {
+            format: Format::SingleTrack,
+            timing: Timing::Metrical(Self::TPB.into()),
+        };
+        let tracks = vec![self.to_track()];
         Smf { header, tracks }
+    }
+    pub fn play(&self, conn: &mut MidiOutputConnection) {
+        const NOTE_ON: u8 = 0x90;
+        const NOTE_OFF: u8 = 0x80;
+        let track = self.to_track();
+        for event in track {
+            thread::sleep(Duration::from_millis(
+                u64::from(u32::from(event.delta)) * 60000
+                    / u64::from(Self::TPB)
+                    / u64::from(Self::BPM),
+            ));
+            if let TrackEventKind::Midi { channel, message } = event.kind {
+                let payload: &[u8] = match message {
+                    MidiMessage::NoteOn { key, vel } => {
+                        &[NOTE_ON | u8::from(channel), key.into(), vel.into()]
+                    }
+                    MidiMessage::NoteOff { key, vel } => {
+                        &[NOTE_OFF | u8::from(channel), key.into(), vel.into()]
+                    }
+                    _ => &[],
+                };
+                conn.send(payload).unwrap();
+            }
+        }
     }
 }
 
